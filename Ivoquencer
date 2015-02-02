@@ -1,0 +1,773 @@
+#include <Bounce.h>
+#include <LiquidCrystal.h>
+#include <Encoder.h>
+
+/// LCDisplay
+LiquidCrystal lcd0(24, 22, 21, 20, 19, 18);
+LiquidCrystal lcd1(24, 17, 21, 20, 19, 18);
+
+byte block[8] = {
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111
+};
+
+byte ohm = B11110100;
+byte arrow = B01111110;
+
+/// Midi Kanal
+const int channel = 1; ///Set the midi channel
+
+/// Multiplexer Stuff
+int r0 = 0;      //value of select pin at the 4051 (s0)
+int r1 = 0;      //value of select pin at the 4051 (s1)
+int r2 = 0;      //value of select pin at the 4051 (s2)
+
+int s00 = 6;    /// Pins für die binärschalter am Multiplexer
+int s01 = 5;
+int s02 = 4;
+
+int countMplx = 0;   //which y pin is selected
+
+/// Buttons und Debouncer
+int butPinA = 7; //Welcher Pin der Button Input ist (Bank A)
+int butPinB = 8; //(Bank B)
+int butPinC = 9;
+int butPinD = 10;
+int menuBut = 13; /// Encoder button
+
+/// Menü Stuff
+boolean changePara;  //false=menüpunkte auswählen, true=parameter ändern
+int menuItem;   //0 scale, 1 gate, 2 loop, 3 trans, 4 root
+
+/// Parameter im Menü
+int scaleSelected;
+int gateLength = 96;
+int loopLength;
+int transpose;
+int rootNote;
+
+String noteNames [12] = {
+  "C ", "C#", "D ", "D#", "E ", "F ", "F#", "G ", "G#", "A ", "A#", "B "};
+///                   c  c# d  d# e  f  f# g  g# a  a#  b
+int chromatic [12] = {
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+int major     [12] = {
+  0, 0, 2, 2, 4, 5, 5, 7, 7, 9, 9 , 11};
+int minorNat  [12] = {
+  0, 0, 2, 3, 3, 5, 5, 7, 8, 8, 10, 10};
+int minorHarm [12] = {
+  0, 0, 2, 3, 3, 5, 5, 7, 8, 8, 11, 11};
+int blues     [12] = {
+  0, 0, 0, 3, 3, 5, 6, 7, 7, 7, 10, 10};
+int pentaton  [12] = {
+  0, 0, 2, 2, 4, 4, 4, 7, 7, 9, 9 , 12};
+//boolean record;
+//int stepTranspose [8]= {
+//  1,1,1,1,1,1,1,1};
+
+/// Encoder
+Encoder menuEnc(36, 37);
+long preEncPosition = -999;
+long newEncPosition;
+int preRead;
+
+/// BANK A DEBOUNCE
+Bounce bouncerA[8] = {
+  Bounce( butPinA,5 ),
+  Bounce( butPinA,5 ),
+  Bounce( butPinA,5 ),
+  Bounce( butPinA,5 ),
+  Bounce( butPinA,5 ),
+  Bounce( butPinA,5 ),
+  Bounce( butPinA,5 ),
+  Bounce( butPinA,5 ),
+};
+
+/// BANK B DEBOUNCE
+Bounce bouncerB[8] = {
+  Bounce( butPinB,5 ),
+  Bounce( butPinB,5 ),
+  Bounce( butPinB,5 ),
+  Bounce( butPinB,5 ),
+  Bounce( butPinB,5 ),
+  Bounce( butPinB,5 ),
+  Bounce( butPinB,5 ),
+  Bounce( butPinB,5 )
+  };
+
+  /// BANK C DEBOUNCE
+Bounce bouncerC[8] = {
+  Bounce( butPinC,5 ),
+  Bounce( butPinC,5 ),
+  Bounce( butPinC,5 ),
+  Bounce( butPinC,5 ),
+  Bounce( butPinC,5 ),
+  Bounce( butPinC,5 ),
+  Bounce( butPinC,5 ),
+  Bounce( butPinC,5 ),
+};
+
+/// BANK D DEBOUNCE
+Bounce bouncerD[8] = {
+  Bounce( butPinD,5 ),
+  Bounce( butPinD,5 ),
+  Bounce( butPinD,5 ),
+  Bounce( butPinD,5 ),
+  Bounce( butPinD,5 ),
+  Bounce( butPinD,5 ),
+  Bounce( butPinD,5 ),
+  Bounce( butPinD,5 )
+  }; 
+
+  /// ENCODER DEBOUNCE
+  Bounce bouncerMb = Bounce( menuBut,5 );
+
+/// MIDI CLOCK
+byte globalCounter;
+byte currentStep;
+int pastSteps;
+byte CLOCK = 248; 
+byte START = 250; 
+byte CONTINUE = 251; 
+byte STOP = 252;
+float clockDivider = 1;  //1 normal, 0.5 doubletime, 2 halftime
+boolean resetAtBarStart; //wenn true dann auf den ersten Step zurück wenn der Takt vorbei ist
+boolean resetAtNextNote; //das Selbe nur am ende der aktuellen Note
+boolean goToStep0;
+int goToStep;  //zu welchem Schritt gesprungen werden soll
+
+/// LEDs
+int leds[8] = {
+  27,0,1,14,15,16,26,25};
+int ledBrightness = 10; //0 bis 255
+
+/// Variable geht auf 1 wenn einer der Bank D Buttons gedrückt ist (momentary)
+/// Damit wird angezeigt wie oft der jeweilige Step wiederholt wird.
+boolean repeatSelect;
+boolean repeatNow;  ///Ist true wenn der Schritt noch öfter wiederholt wird
+int repeatMplx;  ///für die Repeat anzeige (welche Bank D Taste gedrückt wurde)
+int repeatCounter=1; // zählt wie oft der aktuelle Schritt wiederholt wird
+
+/// Anzahl der Wiederholungen jedes Steps
+int repeats[8] = {
+  1,1,1,1,1,1,1,1};
+
+/// Ist der step an?
+int stepOn[8] = {
+  1,1,1,1,1,1,1,1};
+
+/// Faders
+int faderPin[8] = {
+  0,1,2,3,4,5,6,7};
+int faderVal[8];
+int preFaderVal;
+
+/// Parameter Locks
+boolean showParaLockStep;
+int paraLockStepSelect=-1; //-1 wenn kein Step ausgewählt ist, 0=step1, 1=step2, etc.
+//int paraLockStepSelect[8] = {
+//  0,0,0,0,0,0,0,0};
+int stepTranspose[8] = {
+  0,0,0,0,0,0,0,0};
+
+////////////////////////////////////SETUP///////////
+void setup() { 
+  lcd0.createChar(0, block);
+  lcd1.createChar(0, block);
+  Serial.begin(31250);
+  ///Initiate Display
+  lcd0.begin(16, 2);
+  lcd0.print("Octropolis v3.21");
+  lcd0.setCursor(0, 1);
+  lcd0.print("Ivo Francx");
+  lcd1.begin(16, 2);
+  delay(1000);
+  lcd0.clear();
+
+  ///LEDpins
+  /*pinMode(leds[0], OUTPUT);
+  pinMode(leds[1], OUTPUT);   
+  pinMode(leds[2], OUTPUT); 
+  pinMode(leds[3], OUTPUT); 
+  pinMode(leds[4], OUTPUT); 
+  pinMode(leds[5], OUTPUT); 
+  pinMode(leds[6], OUTPUT); 
+  pinMode(leds[7], OUTPUT);
+  */
+  ///Button Pins
+  pinMode(butPinA, INPUT);
+  pinMode(butPinB, INPUT);
+  pinMode(butPinC, INPUT);
+  pinMode(butPinD, INPUT);
+  pinMode(menuBut, INPUT);
+
+  ///Multiplexer Adressierungspins
+  pinMode(s00, OUTPUT);    // s0
+  pinMode(s01, OUTPUT);    // s1
+  pinMode(s02, OUTPUT);    // s2
+
+  turnLedsOn();
+
+  usbMIDI.setHandleRealTimeSystem(RealTimeSystem);
+
+  drawMenuBasic();
+  drawMenuParameters();
+  drawMenuArrow(menuItem,changePara);
+} 
+
+///////////////////////////////LOOP START////////////////////////////
+
+void loop() {
+
+  //// Menü button
+  bouncerMb.update();
+  //// Encoder lesen und Parameter ändern
+  getEncoder();
+
+  ///MenüButton
+  if(bouncerMb.fallingEdge()) {
+    changePara^=true;
+    drawMenuArrow(menuItem,changePara);
+  }
+
+  ////////////START MPLX////////////
+  for (countMplx=0; countMplx<=7; countMplx++) {
+
+    // select the bit  
+    r0 = bitRead(countMplx,0);     
+    r1 = bitRead(countMplx,1);
+    r2 = bitRead(countMplx,2);
+
+    // Multiplexer Adressieren
+    digitalWrite(s00, r0);
+    digitalWrite(s01, r1);
+    digitalWrite(s02, r2);
+
+    // Update the bouncers
+    bouncerA[countMplx].update();
+    bouncerB[countMplx].update();
+    bouncerC[countMplx].update();
+    bouncerD[countMplx].update();
+
+    /// Select ParaLock
+    for (int i=0;i<8;i++) {
+      if (bouncerA[i].fallingEdge()) {
+        paraLockStepSelect=i;
+        showParaLockStep = true;
+        lcd0.clear();
+        lcd1.clear();
+        drawParaLockMenu(paraLockStepSelect);
+        drawParaLockParameter(paraLockStepSelect);
+      }
+      if (bouncerA[i].risingEdge()) {
+        paraLockStepSelect=-1;
+        showParaLockStep = false;
+        drawMenuBasic();
+        drawMenuParameters();
+        drawMenuArrow(menuItem,changePara);
+      }
+    }
+
+    /// Select repeat mode
+    if (bouncerB[countMplx].fallingEdge()) {
+      turnLedsOff();
+      repeatSelect = true;
+      repeatMplx = countMplx; 
+      turnBarOn(repeats[countMplx]);
+    }
+    if (repeatSelect && bouncerC[countMplx].risingEdge()) {
+      repeats[repeatMplx]=countMplx+1;
+      turnBarOn(repeats[repeatMplx]);
+    }
+    if (bouncerB[countMplx].risingEdge()) {
+      turnActiveLedsOn();
+      repeatSelect = false;
+    }
+
+    // Turn Steps on and off
+    if (bouncerC[countMplx].risingEdge()&& !repeatSelect) {
+
+      if(stepOn[countMplx]) {
+        stepOn[countMplx] = 0;
+        analogWrite(leds[countMplx], 0);
+      }
+      else if (!repeatSelect) {
+        stepOn[countMplx] = 1;
+        analogWrite(leds[countMplx], ledBrightness);
+      }
+    }
+
+    // Select the clock Divider (Tempo)
+    if (bouncerD[0].risingEdge()) {
+      clockDivider = 2;
+    }
+    if (bouncerD[1].risingEdge()) {
+      clockDivider = 1;
+    }
+    if (bouncerD[2].risingEdge()) {
+      clockDivider = 0.5;
+    }
+
+    /// Restart 
+    /////bei Taktstart
+    if (bouncerD[3].fallingEdge()) {
+      resetAtBarStart=true;
+    }
+    /////////////////////////////////////////////////////JUMPER!
+    /////auf schritt 0 bei ende der aktuellen Note
+    if (bouncerD[4].fallingEdge()) {
+      resetAtNextNote=true;
+      goToStep=0;
+      repeatCounter=1;
+    }
+    /////auf schritt 2 bei ende der aktuellen Note
+    if (bouncerD[5].fallingEdge()) {  
+      resetAtNextNote=true;
+      goToStep=2;  
+      repeatCounter=1;
+    }
+    /////auf schritt 4 bei ende der aktuellen Note
+    if (bouncerD[6].fallingEdge()) {  
+      resetAtNextNote=true;
+      goToStep=4;
+      repeatCounter=1;
+    }
+    /////auf schritt 4 bei ende der aktuellen Note
+    if (bouncerD[7].fallingEdge()) {  
+      resetAtNextNote=true;
+      goToStep=6;
+      repeatCounter=1;
+    }
+
+  }
+  ////////////END MPLX////////////
+  usbMIDI.read();
+} 
+
+///////////////////////////////LOOP END////////////////////////////
+
+/// Checkt nach MidiClock Signalen
+void RealTimeSystem(byte realtimebyte) { 
+
+  /// Wenn midi Clock Tik kommt
+  if(realtimebyte == 248) { 
+
+    //////ENDE DER NOTE
+    if(globalCounter%((int) (12*clockDivider)) == (int)map(gateLength,0,100,1,(12*clockDivider)-1)) {
+      if (gateLength<100) usbMIDI.sendNoteOff(preFaderVal,0,channel);
+      if (!repeatSelect) turnActiveLedsOn();
+      if (pastSteps>=loopLength-1&&loopLength>0) {
+        resetAtNextNote=true; 
+        //goToStep = 0;
+      }
+
+      pastSteps++;////Wieviele Schritte waren schon.
+/*
+      if (goToStep0) {
+        if(pastSteps>=loopLength-1) pastSteps=0;
+        goToStep0=false;
+      }
+*/
+      if (goToStep0) {
+        if(pastSteps>=loopLength-1) pastSteps=0;
+        goToStep0=false;
+      }
+      
+      if (repeatCounter == 1 || resetAtNextNote) {
+        repeatNow = false;
+        currentStep++;
+      }
+
+      if (resetAtNextNote) {
+        currentStep=goToStep;
+        if(pastSteps>=loopLength-1) pastSteps=0;
+        repeatCounter=0;
+        resetAtNextNote=false;
+      }
+      if (repeatCounter > 1) {
+        repeatNow = true;
+        repeatCounter--;
+      }
+      if (currentStep==7) goToStep0=true;
+      currentStep%=8;
+    }
+
+    //////ANFANG DER NOTE
+    if(globalCounter%((int) (12*clockDivider)) == 0) {
+
+      if(!repeatNow) repeatCounter = repeats[currentStep];
+
+      if (stepOn[currentStep]) { 
+        if(!repeatSelect) analogWrite(leds[currentStep], 0);
+        faderVal[currentStep]=map(analogRead(faderPin[currentStep]),0,1023,0,23);
+
+        if (faderVal[currentStep]>11) {
+          faderVal[currentStep]-=12;
+          faderVal[currentStep] = pickNote(scaleSelected, faderVal[currentStep])+ 60 + rootNote + transpose*12 + stepTranspose[currentStep]*12;
+        }
+        if (faderVal[currentStep]<12) {
+          faderVal[currentStep] = pickNote(scaleSelected, faderVal[currentStep])+ 48 + rootNote + transpose*12 + stepTranspose[currentStep]*12;
+        }
+
+        if(!(gateLength == 100 && preFaderVal == faderVal[currentStep])) usbMIDI.sendNoteOn(faderVal[currentStep],99,channel);
+        if(preFaderVal != faderVal[currentStep]) usbMIDI.sendNoteOff(preFaderVal,0,channel); //Turns off the previous note, if it hasn't been turned off yet! and only if its not the same note!
+        preFaderVal=faderVal[currentStep];
+      }
+      if (!stepOn[currentStep]) {
+        if(!repeatSelect) analogWrite(leds[currentStep], ledBrightness);
+        if(gateLength==100) usbMIDI.sendNoteOff(preFaderVal,0,channel);
+      }
+    }
+
+    ////Leds wieder anschalten fürs Lauflicht)
+    if(globalCounter%((int) (12*clockDivider)) == 3 && stepOn[currentStep]) {
+      if(!repeatSelect) analogWrite(leds[currentStep], ledBrightness);
+    }
+    if(globalCounter%((int) (12*clockDivider)) == 3 && !stepOn[currentStep]) {
+      if(!repeatSelect) analogWrite(leds[currentStep], ledBrightness);
+    }
+
+    ////Globaler Counter 0 bis 96
+    globalCounter++;
+
+    //// Restart wenn der nächste Takt anfängt
+    if (globalCounter == 96 && resetAtBarStart) {
+      resetAtBarStart=false;
+      currentStep=goToStep;
+      repeatCounter=1;
+      pastSteps=0;
+    }
+    globalCounter %=96;
+  } 
+
+  /// Wenn Startsignal kommt
+  if(realtimebyte == START || realtimebyte == CONTINUE) { 
+    globalCounter = 0;
+    currentStep = 0;
+    if (!repeatSelect) turnActiveLedsOn();
+  } 
+
+  /// Wenn Stopsignal kommt
+  if(realtimebyte == STOP) {
+    for(int i=0;i<128;i++) {
+      usbMIDI.sendNoteOff(i,0,channel); 
+    }
+    pastSteps=0;
+    if (!repeatSelect) turnActiveLedsOn();
+  } 
+
+}
+//////////////////////////ENCODER////////////////////
+void getEncoder() {
+
+  if (preRead>=menuEnc.read()+4||preRead<=menuEnc.read()-4)  {
+
+    newEncPosition = menuEnc.read()/4;
+
+    ////Wenn Menüpunkte auszuwählen sind
+      if(!changePara) {
+        if (newEncPosition > preEncPosition && menuItem<4) {
+          menuItem++;
+          drawMenuArrow(menuItem,changePara);
+        }
+        if (newEncPosition < preEncPosition && menuItem>0) {
+          menuItem--;
+          drawMenuArrow(menuItem,changePara);
+        }
+      }
+      ////Wenn Scale ausgewählt ist
+      if(changePara && menuItem==0) {
+        if (newEncPosition > preEncPosition && scaleSelected<5) {
+          scaleSelected++;
+        }
+        if (newEncPosition < preEncPosition && scaleSelected>0) {
+          scaleSelected--;
+        }
+      }
+      /////Wenn GateLength ausgewählt ist
+      if(changePara && menuItem==1) {
+        if (newEncPosition > preEncPosition && gateLength<100) {
+          gateLength+=4;
+        }
+        if (newEncPosition < preEncPosition && gateLength>1) {
+          gateLength-=4;
+        }
+      }
+      ////Wenn LoopLength ausgewählt ist
+      if(changePara && menuItem==2) {
+        if (newEncPosition > preEncPosition && loopLength<16) {
+          loopLength++;
+        }
+        if (newEncPosition < preEncPosition && loopLength>0) {
+          loopLength--;
+        }
+      }
+      ////Wenn Transpose ausgewählt ist
+      if(changePara && menuItem==3) {
+        ///Transpose alle Steps
+        if (newEncPosition > preEncPosition && transpose<3) {
+             if (!showParaLockStep) transpose++;
+        }
+        if (newEncPosition < preEncPosition && transpose>-3) {
+          if (!showParaLockStep) transpose--;
+        }
+        ///Transpose einzelne Steps
+        if (newEncPosition > preEncPosition && stepTranspose[paraLockStepSelect]<3) {
+             if (showParaLockStep) stepTranspose[paraLockStepSelect]++;
+        }
+        if (newEncPosition < preEncPosition && stepTranspose[paraLockStepSelect]>-3) {
+          if (showParaLockStep) stepTranspose[paraLockStepSelect]--;
+        }
+      }
+      ////Wenn rootNote ausgewählt ist
+      if(changePara && menuItem==4) {
+        if (newEncPosition > preEncPosition && rootNote<11) {
+          rootNote++;
+        }
+        if (newEncPosition < preEncPosition && rootNote>0) {
+          rootNote--;
+        }
+      }
+    preEncPosition = newEncPosition;
+    preRead = menuEnc.read();
+    if(!showParaLockStep) drawMenuParameters();                       /////PARAMETER ZEICHNEN!!!
+    if(showParaLockStep) drawParaLockParameter(paraLockStepSelect);   /////PARAMETER FÜR STEPLOCK ZEICHNEN!!!
+  }
+}
+
+///////////////////////////MENÜ/////////////////////////////
+/// Menü anzeigen
+void drawMenuBasic() {
+  lcd0.setCursor(1,0);
+  lcd0.print("scale     gate");
+  //lcd0.setCursor(14,1);
+  //lcd0.print("%");
+  lcd1.setCursor(1,0);
+  lcd1.print("loop trans root");
+}
+
+void drawMenuArrow(int item, int row) {
+  lcd0.setCursor(0,0);
+  lcd0.print(" ");
+  lcd0.setCursor(10,0);
+  lcd0.print(" ");
+
+  lcd0.setCursor(0,1);
+  lcd0.print(" ");
+  lcd0.setCursor(10,1);
+  lcd0.print(" ");
+
+  lcd1.setCursor(0,0);
+  lcd1.print(" ");
+  lcd1.setCursor(5,0);
+  lcd1.print(" ");
+  lcd1.setCursor(11,0);
+  lcd1.print(" ");
+
+  lcd1.setCursor(0,1);
+  lcd1.print(" ");
+  lcd1.setCursor(5,1);
+  lcd1.print(" ");
+  lcd1.setCursor(11,1);
+  lcd1.print(" ");
+
+  switch (item) {
+  case 0:
+    lcd0.setCursor(0,row);
+    lcd0.write(arrow);
+    break;
+  case 1:
+    lcd0.setCursor(10,row);
+    lcd0.write(arrow);
+    break;
+  case 2:
+    lcd1.setCursor(0,row);
+    lcd1.write(arrow);
+    break;
+  case 3:
+    lcd1.setCursor(5,row);
+    lcd1.write(arrow);
+    break;
+  case 4:
+    lcd1.setCursor(11,row);
+    lcd1.write(arrow);
+    break;
+  }    
+}
+
+void drawMenuParameters() {  //////////Passiert in der getEncoder(); Funktion!
+
+  //// draw scale Parameter
+  lcd0.setCursor(1,1);
+  switch(scaleSelected) {
+  case 0:
+    lcd0.print("chroma");
+    break;
+  case 1:
+    lcd0.print("major ");
+    break;
+  case 2:
+    lcd0.print("minNat");
+    break;
+  case 3:
+    lcd0.print("minHrm");
+    break;
+  case 4:
+    lcd0.print("blues ");
+    break;
+  case 5:
+    lcd0.print("penta ");
+    break;
+  }
+
+  //// draw gateLength parameter
+  lcd0.setCursor(11,1);
+  if (gateLength>=0 && gateLength <= 9) {
+    lcd0.print("  ");
+    lcd0.print(gateLength);
+    lcd0.print("%");
+  }
+  else if (gateLength>=10 && gateLength <= 99) {
+    lcd0.print(" ");
+    lcd0.print(gateLength);
+    lcd0.print("%");
+  }
+  else if (gateLength==100) {
+    lcd0.print("tie ");
+  }
+
+  //// draw loopLength parameter
+  lcd1.setCursor(1,1);
+  if (loopLength==0) {
+    lcd1.print("off");
+  }
+  else if (loopLength>0 && loopLength<10) {
+    lcd1.print("  ");
+    lcd1.print(loopLength);
+  }
+  else if (loopLength>0 && loopLength<10) {
+    lcd1.print("  ");
+    lcd1.print(loopLength);
+  }
+  else if (loopLength>=10) {
+    lcd1.print(" ");
+    lcd1.print(loopLength);
+  }
+
+  //// draw Transpose parameter
+  lcd1.setCursor(6,1);
+  switch (transpose) {
+  case -3:
+    lcd1.print(" -3");
+    break;
+  case -2:
+    lcd1.print(" -2");
+    break;
+  case -1:
+    lcd1.print(" -1");
+    break;
+  case 0:
+    lcd1.print("  0");
+    break;
+  case 1:
+    lcd1.print("  1");
+    break;
+  case 2:
+    lcd1.print("  2");
+    break;
+  case 3:
+    lcd1.print("  3");
+    break;
+  }
+
+  //// draw rootnote parameter
+  lcd1.setCursor(13,1);
+  lcd1.print(noteNames[rootNote]);
+}
+
+void drawParaLockParameter(int stepToChange) {
+  
+  ////Transpose der einzelnen Steps:
+  lcd1.setCursor(6,1);
+  switch (stepTranspose[stepToChange]) {
+  case -3:
+    lcd1.print(" -3");
+    break;
+  case -2:
+    lcd1.print(" -2");
+    break;
+  case -1:
+    lcd1.print(" -1");
+    break;
+  case 0:
+    lcd1.print("  0");
+    break;
+  case 1:
+    lcd1.print("  1");
+    break;
+  case 2:
+    lcd1.print("  2");
+    break;
+  case 3:
+    lcd1.print("  3");
+    break;
+  }
+}
+
+void drawParaLockMenu(int stepToChange) { ///stepToChange = welcher Step wird verändert
+  lcd0.setCursor(0,0);
+  lcd0.print("change stepNo. ");
+  lcd0.print(stepToChange);
+}
+
+///////////////////////////ZUSATZ FUNKTIONEN////////////////
+/// Alle Leds ausschalten
+void turnLedsOff() {
+  for (int i=0;i<8;i++){
+    analogWrite(leds[i], 0);
+  }  
+}
+
+/// Alle Leds anschalten
+void turnLedsOn() {
+  for (int i=0;i<8;i++){
+    analogWrite(leds[i], ledBrightness);
+  }
+}
+
+/// Nur die aktiven Leds anschalten
+void turnActiveLedsOn() {
+  for (int i=0;i<8;i++) {
+    if (stepOn[i]==1) {
+      analogWrite(leds[i],ledBrightness);
+    }
+    else {
+      analogWrite(leds[i],0);
+    }
+  }
+}
+
+/// Einen Balken aus n Leds anschalten
+void turnBarOn(int n) {
+  for (int i=0;i<8;i++) {
+    analogWrite(leds[i],(i<repeats[repeatMplx])*10);
+  }
+}
+
+/// Note einer Tonleiter ausgeben
+int pickNote (int scale, int noteNumber) {
+  int returnThis=0;
+  if (scale == 0) returnThis = chromatic[noteNumber];
+  else if (scale == 1) returnThis = major[noteNumber];
+  else if (scale == 2) returnThis = minorNat[noteNumber];
+  else if (scale == 3) returnThis = minorHarm[noteNumber];
+  else if (scale == 4) returnThis = blues[noteNumber]; 
+  else if (scale == 5) returnThis = pentaton[noteNumber];
+  return returnThis;
+}
